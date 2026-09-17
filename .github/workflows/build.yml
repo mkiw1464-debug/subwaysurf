@@ -34,7 +34,6 @@ jobs:
 
       - name: Verify repo structure
         run: |
-          echo "=== Repo structure ==="
           find "$GITHUB_WORKSPACE" -name "*.xcodeproj" -maxdepth 4
           find "$GITHUB_WORKSPACE" -name "*.swift" -maxdepth 6 | sort
 
@@ -60,14 +59,8 @@ jobs:
             "bad_query.c" "mcm_bridge.m" "kexploit_opa334.m" \
             "offsets.m" "krw.m" "kutils.m" "vnode.m" \
             "sandbox_escape.m" "wallpaper_zip.c"; do
-            if grep -q "$entry" "$PBXPROJ"; then
-              echo "  OK $entry"
-            else
-              echo "  MISSING: $entry"
-              exit 1
-            fi
+            grep -q "$entry" "$PBXPROJ" && echo "  OK $entry" || { echo "  MISSING: $entry"; exit 1; }
           done
-          echo "All file references present."
 
       - name: List schemes
         run: |
@@ -97,6 +90,7 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             ENABLE_BITCODE=NO \
+            ENABLE_ON_DEMAND_RESOURCES=NO \
             DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             SWIFT_COMPILATION_MODE=wholemodule \
             SWIFT_OPTIMIZATION_LEVEL=-Osize \
@@ -130,13 +124,12 @@ jobs:
           if [ -z "$APP_PATH" ]; then
             APP_PATH=$(find "$RUNNER_TEMP/DerivedData" -name "FFEX.app" -not -path "*.dSYM/*" | head -1)
           fi
-          echo "App: $APP_PATH"
           if [ -z "$APP_PATH" ]; then
             echo "ERROR: FFEX.app not found"
             find "$RUNNER_TEMP" -name "*.app" 2>/dev/null | head -10
             exit 1
           fi
-
+          echo "App: $APP_PATH"
           IPA_STAGING="$RUNNER_TEMP/IPAStaging/Payload"
           mkdir -p "$IPA_STAGING"
           cp -R "$APP_PATH" "$IPA_STAGING/"
