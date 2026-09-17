@@ -72,7 +72,7 @@ enum ContainerStore {
         return nil
     }
 
-    private static func readContainerMetadata(containerPath: String) -> (bundleID: String, displayName: String)? {
+    private static func readContainerMetadata(containerPath: String) -> ContainerMetadata? {
         let metaPath = (containerPath as NSString)
             .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
         var data: Data?
@@ -94,6 +94,6 @@ enum ContainerStore {
         let bundleID    = pl["MCMMetadataIdentifier"] as? String ?? ""
         let displayName = (pl["MCMMetadataInfo"] as? [String: Any])
             .flatMap { ($0["CFBundleDisplayName"] ?? $0["CFBundleName"]) as? String } ?? ""
-        return (bundleID, displayName)
+        return ContainerMetadata(bundleID: bundleID, displayName: displayName)
     }
 }
