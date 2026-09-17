@@ -185,8 +185,11 @@ struct LoginView: View {
                 await MainActor.run { session.login(info: info) }
             } catch let e as LicenseError {
                 await MainActor.run {
-                    errorMessage  = e.errorDescription
-                    isValidating  = false
+                    switch e {
+                    case .revoked(let reason): errorMessage = reason.displayMessage
+                    case .networkError:        errorMessage = t("key_invalid")
+                    }
+                    isValidating = false
                 }
             } catch {
                 await MainActor.run {
