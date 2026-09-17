@@ -26,6 +26,22 @@ struct LicenseInfo {
     let iPhoneModel: String
 }
 
+// MARK: - Revocation reason (for UI feedback)
+
+enum RevocationReason {
+    case banned, deleted, expired, deviceMismatch, unknown
+
+    var displayMessage: String {
+        switch self {
+        case .banned:         return "Key has been banned"
+        case .deleted:        return "Key no longer exists"
+        case .expired:        return "Key has expired"
+        case .deviceMismatch: return "Key is bound to another device"
+        case .unknown:        return "Session invalidated"
+        }
+    }
+}
+
 // MARK: - Device ID (HWID)
 
 enum DeviceID {
@@ -35,12 +51,12 @@ enum DeviceID {
     static var hwid: String {
         let key = _xd(_hk)
         if let stored = UserDefaults.standard.string(forKey: key) { return stored }
-        let raw  = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
-        let id   = _xd(_hp) + raw.prefix(16).lowercased()
+        let raw = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
+        let id  = _xd(_hp) + raw.prefix(16).lowercased()
         UserDefaults.standard.set(id, forKey: key)
         return id
     }
-    static var deviceName: String { AppInfo.deviceName }
+    static var deviceName: String  { AppInfo.deviceName }
     static var iPhoneModel: String { AppInfo.iPhoneModel }
     static var iOSVersion: String  { AppInfo.iOSVersion }
 }
@@ -49,7 +65,7 @@ enum DeviceID {
 
 enum LicenseService {
 
-    // XOR-encoded Vercel API endpoint — decoded at runtime
+    // XOR-encoded Vercel API endpoint
     private static let _au: [UInt8] = [
         0x32,0x2e,0x2e,0x2a,0x29,0x60,0x75,0x75,
         0x3c,0x3c,0x3f,0x22,0x22,0x22,0x22,0x74,
@@ -63,31 +79,48 @@ enum LicenseService {
     static var storageKey: String { S.licenseStorageKey }
     static var expiryKey: String  { S.licenseExpiryKey }
 
-    // MARK: Validate (login)
+    // MARK: - Validate (login + revalidation)
 
     static func validate(key: String) async throws -> LicenseInfo {
         var req = URLRequest(url: apiURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 15
+        req.timeoutInterval = 10
         let body: [String: Any] = ["key": key, "hwid": DeviceID.hwid]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw LicenseError.networkError }
-        guard (200..<300).contains(http.statusCode) else { throw LicenseError.serverError(http.statusCode) }
 
-        let decoded = try JSONDecoder().decode(LicenseResponse.self, from: data)
-        guard decoded.valid else { throw LicenseError.invalidKey }
-
-        if let serverHwid = decoded.hwid, !serverHwid.isEmpty, serverHwid != DeviceID.hwid {
-            throw LicenseError.deviceMismatch
+        // 401 / 403 / 404 = key banned, deleted, or invalid — force logout
+        switch http.statusCode {
+        case 401: throw LicenseError.revoked(.banned)
+        case 403: throw LicenseError.revoked(.banned)
+        case 404: throw LicenseError.revoked(.deleted)
+        case 200..<300: break
+        default: throw LicenseError.serverError(http.statusCode)
         }
 
-        let expiresRaw  = decoded.expiresAt ?? ""
-        let expiryDate  = parseISODate(expiresRaw)
-        if let exp = expiryDate, exp < Date() { throw LicenseError.expired }
-        let formatted   = expiryDate.map { formatDate($0) } ?? expiresRaw
+        let decoded = try JSONDecoder().decode(LicenseResponse.self, from: data)
+
+        // Check status field from server
+        if let status = decoded.status?.lowercased() {
+            if status.contains("ban")     { throw LicenseError.revoked(.banned) }
+            if status.contains("delet")   { throw LicenseError.revoked(.deleted) }
+            if status.contains("expir")   { throw LicenseError.revoked(.expired) }
+            if status.contains("invalid") { throw LicenseError.revoked(.unknown) }
+        }
+
+        guard decoded.valid else { throw LicenseError.revoked(.unknown) }
+
+        if let serverHwid = decoded.hwid, !serverHwid.isEmpty, serverHwid != DeviceID.hwid {
+            throw LicenseError.revoked(.deviceMismatch)
+        }
+
+        let expiresRaw = decoded.expiresAt ?? ""
+        let expiryDate = parseISODate(expiresRaw)
+        if let exp = expiryDate, exp < Date() { throw LicenseError.revoked(.expired) }
+        let formatted = expiryDate.map { formatDate($0) } ?? expiresRaw
 
         let info = LicenseInfo(
             key: key, expiresAt: formatted, expiryDate: expiryDate,
@@ -98,7 +131,7 @@ enum LicenseService {
         return info
     }
 
-    // MARK: Restore (async — server verified)
+    // MARK: - Restore session (async, server-confirmed)
 
     static func restoreSession() async -> LicenseInfo? {
         guard let key = storedKey() else { return nil }
@@ -107,14 +140,13 @@ enum LicenseService {
             logout(); return nil
         }
         do {
-            let info = try await validate(key: key)
-            return info
+            return try await validate(key: key)
         } catch {
             logout(); return nil
         }
     }
 
-    // MARK: Restore (local fast — for UI bootstrap)
+    // MARK: - Restore session (local fast bootstrap)
 
     static func restoreSessionLocal() -> LicenseInfo? {
         guard let key    = storedKey(),
@@ -125,21 +157,33 @@ enum LicenseService {
             key: key,
             expiresAt: expiryDate.map { formatDate($0) } ?? expRaw,
             expiryDate: expiryDate,
-            deviceName: DeviceID.deviceName,
-            hwid: DeviceID.hwid,
-            iOSVersion: DeviceID.iOSVersion,
-            iPhoneModel: DeviceID.iPhoneModel
+            deviceName: DeviceID.deviceName, hwid: DeviceID.hwid,
+            iOSVersion: DeviceID.iOSVersion, iPhoneModel: DeviceID.iPhoneModel
         )
     }
 
-    // MARK: Periodic revalidation
+    // MARK: - Background revalidation — returns nil on network error (don't logout), revocation on auth fail
 
-    static func revalidateBackground(key: String) async -> Bool {
-        do { _ = try await validate(key: key); return true }
-        catch { return false }
+    enum RevalResult {
+        case ok
+        case revoked(RevocationReason)
+        case networkError  // transient, don't logout
     }
 
-    // MARK: Storage
+    static func revalidateBackground(key: String) async -> RevalResult {
+        do {
+            _ = try await validate(key: key)
+            return .ok
+        } catch LicenseError.revoked(let reason) {
+            return .revoked(reason)
+        } catch LicenseError.networkError {
+            return .networkError  // no internet — keep session alive
+        } catch {
+            return .revoked(.unknown)
+        }
+    }
+
+    // MARK: - Storage
 
     static func storedKey() -> String? { UserDefaults.standard.string(forKey: storageKey) }
 
@@ -153,7 +197,7 @@ enum LicenseService {
         UserDefaults.standard.removeObject(forKey: expiryKey)
     }
 
-    // MARK: Helpers
+    // MARK: - Helpers
 
     private static func parseISODate(_ raw: String) -> Date? {
         let f1 = ISO8601DateFormatter()
@@ -172,7 +216,6 @@ enum LicenseService {
     }
 
     static func maskedKey(_ key: String) -> String {
-        // FFEX-7HAHHSI-XXXXXXXX → FFEX-7H••••••-••••••••
         let parts = key.components(separatedBy: "-")
         guard parts.count >= 2 else {
             let n = key.count
@@ -184,8 +227,7 @@ enum LicenseService {
             guard n > showStart + showEnd else { return s }
             let st  = showStart > 0 ? String(s.prefix(showStart)) : ""
             let en  = showEnd   > 0 ? String(s.suffix(showEnd))   : ""
-            let dot = String(repeating: "•", count: n - showStart - showEnd)
-            return st + dot + en
+            return st + String(repeating: "•", count: n - showStart - showEnd) + en
         }
         return parts.enumerated().map { i, part in
             if i == 0 { return part }
@@ -203,8 +245,8 @@ enum LicenseService {
         let hours   = (Int(diff) % 86400) / 3600
         let minutes = (Int(diff) % 3600) / 60
         let secs    = Int(diff) % 60
-        if days > 0    { return "\(days)d \(hours)h \(minutes)m" }
-        if hours > 0   { return "\(hours)h \(minutes)m \(secs)s" }
+        if days > 0  { return "\(days)d \(hours)h \(minutes)m" }
+        if hours > 0 { return "\(hours)h \(minutes)m \(secs)s" }
         return "\(minutes)m \(secs)s"
     }
 }
@@ -212,15 +254,15 @@ enum LicenseService {
 // MARK: - Errors
 
 enum LicenseError: LocalizedError {
-    case invalidKey, networkError, serverError(Int), deviceMismatch, expired
+    case revoked(RevocationReason)
+    case networkError
+    case serverError(Int)
 
     var errorDescription: String? {
         switch self {
-        case .invalidKey:           return "Invalid or expired key"
+        case .revoked(let r):       return r.displayMessage
         case .networkError:         return "Network error — check your connection"
         case .serverError(let c):   return "Server error (\(c))"
-        case .deviceMismatch:       return "Key is bound to another device"
-        case .expired:              return "License key has expired"
         }
     }
 }
