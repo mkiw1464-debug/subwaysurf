@@ -32,11 +32,6 @@ jobs:
           sudo xcode-select -s "${XCODE_PATH}/Contents/Developer"
           xcodebuild -version
 
-      - name: Verify repo structure
-        run: |
-          find "$GITHUB_WORKSPACE" -name "*.xcodeproj" -maxdepth 4
-          find "$GITHUB_WORKSPACE" -name "*.swift" -maxdepth 6 | sort
-
       - name: Resolve project path
         id: paths
         run: |
@@ -45,6 +40,14 @@ jobs:
           echo "PROJ=$PROJ"         >> $GITHUB_OUTPUT
           echo "PROJ_DIR=$PROJ_DIR" >> $GITHUB_OUTPUT
           echo "Project: $PROJ"
+
+      - name: Remove Assets.xcassets to prevent actool simulator bug
+        run: |
+          ASSETS="${{ steps.paths.outputs.PROJ_DIR }}/FFEX/Assets.xcassets"
+          if [ -d "$ASSETS" ]; then
+            rm -rf "$ASSETS"
+            echo "Removed: $ASSETS"
+          fi
 
       - name: Validate pbxproj file references
         run: |
@@ -61,6 +64,7 @@ jobs:
             "sandbox_escape.m" "wallpaper_zip.c"; do
             grep -q "$entry" "$PBXPROJ" && echo "  OK $entry" || { echo "  MISSING: $entry"; exit 1; }
           done
+          echo "All file references present."
 
       - name: List schemes
         run: |
@@ -91,6 +95,8 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="" \
             ENABLE_BITCODE=NO \
             ENABLE_ON_DEMAND_RESOURCES=NO \
+            ASSETCATALOG_COMPILER_APPICON_NAME="" \
+            ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME="" \
             DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             SWIFT_COMPILATION_MODE=wholemodule \
             SWIFT_OPTIMIZATION_LEVEL=-Osize \
@@ -101,7 +107,6 @@ jobs:
             STRIP_STYLE=all \
             COPY_PHASE_STRIP=YES \
             GCC_SYMBOLS_PRIVATE_EXTERN=YES \
-            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=YES \
             CONFIGURATION_BUILD_DIR="$BUILD_OUT" \
             2>&1 | tee /tmp/xcodebuild.log
 
