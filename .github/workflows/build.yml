@@ -37,8 +37,6 @@ jobs:
           echo "=== Repo structure ==="
           find "$GITHUB_WORKSPACE" -name "*.xcodeproj" -maxdepth 4
           find "$GITHUB_WORKSPACE" -name "*.swift" -maxdepth 6 | sort
-          find "$GITHUB_WORKSPACE" -name "*.m" -maxdepth 6 | sort
-          find "$GITHUB_WORKSPACE" -name "*.c" -maxdepth 6 | sort
 
       - name: Resolve project path
         id: paths
@@ -76,7 +74,7 @@ jobs:
           cd "${{ steps.paths.outputs.PROJ_DIR }}"
           xcodebuild -project FFEX.xcodeproj -list 2>&1 || true
 
-      - name: Build (unsigned, hardened, size-optimised)
+      - name: Build (unsigned, iphoneos arm64 only)
         run: |
           set -o pipefail
           cd "${{ steps.paths.outputs.PROJ_DIR }}"
@@ -87,10 +85,12 @@ jobs:
             -scheme FFEX \
             -configuration Release \
             -sdk iphoneos \
+            -destination "generic/platform=iOS" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            VALID_ARCHS=arm64 \
             SDKROOT=iphoneos \
-            ONLY_ACTIVE_ARCH=NO \
-            EXCLUDED_ARCHS="arm64e x86_64 i386" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
@@ -107,6 +107,7 @@ jobs:
             STRIP_STYLE=all \
             COPY_PHASE_STRIP=YES \
             GCC_SYMBOLS_PRIVATE_EXTERN=YES \
+            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=YES \
             CONFIGURATION_BUILD_DIR="$BUILD_OUT" \
             2>&1 | tee /tmp/xcodebuild.log
 
@@ -120,8 +121,7 @@ jobs:
 
       - name: Show build log on failure
         if: failure()
-        run: |
-          tail -500 /tmp/xcodebuild.log || true
+        run: tail -500 /tmp/xcodebuild.log || true
 
       - name: Package IPA
         run: |
@@ -140,10 +140,8 @@ jobs:
           IPA_STAGING="$RUNNER_TEMP/IPAStaging/Payload"
           mkdir -p "$IPA_STAGING"
           cp -R "$APP_PATH" "$IPA_STAGING/"
-
           cd "$RUNNER_TEMP/IPAStaging"
           zip -r "$RUNNER_TEMP/FFEX.ipa" Payload/
-
           echo "IPA size: $(du -sh "$RUNNER_TEMP/FFEX.ipa" | cut -f1)"
 
       - name: Upload IPA
