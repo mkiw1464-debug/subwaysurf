@@ -1,6 +1,6 @@
 import Foundation
 
-struct ContainerMetadataRecord: Equatable {
+struct ContainerMetadata: Equatable {
     let bundleID: String
     let displayName: String
 }
