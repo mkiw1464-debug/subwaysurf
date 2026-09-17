@@ -17,6 +17,7 @@ enum InjectState: Equatable {
 struct MainMenuView: View {
     @EnvironmentObject var session: SessionStore
     @StateObject private var langStore = LanguageStore.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var isOnline: Bool? = nil
     @State private var showLogoutAlert = false
@@ -117,6 +118,13 @@ struct MainMenuView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 await checkAvailabilityAll()
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            // FFEX came back to foreground — user left the game
+            // Wipe deployed files immediately
+            if phase == .active {
+                terminateAllSessions()
             }
         }
         .alert(t("logout_confirm_title"), isPresented: $showLogoutAlert) {
@@ -322,12 +330,25 @@ struct MainMenuView: View {
         do {
             let injectSession = try await FFInjectService.inject(game: game, key: key)
             await MainActor.run {
+                // Hook: when game exits, wipe files and reset button
+                injectSession.onGameExited = { [self] in
+                    FFInjectService.terminateSession(injectSession)
+                    if game == .freeFire {
+                        ffSession  = nil
+                        ffState    = .ready
+                    } else {
+                        ffmaxSession = nil
+                        ffmaxState   = .ready
+                    }
+                    log("FFInject: game exited — files wiped")
+                }
                 activeSession.wrappedValue = injectSession
                 state.wrappedValue = .done
             }
-            // Small delay then launch game
+            // Small delay then launch game + start monitor
             try? await Task.sleep(nanoseconds: 600_000_000)
             FFInjectService.launchGame(game)
+            injectSession.startMonitoring()
         } catch {
             await MainActor.run {
                 state.wrappedValue = .failed(error.localizedDescription)
