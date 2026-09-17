@@ -7,6 +7,7 @@ struct LoginView: View {
     @State private var keyInput: String = ""
     @State private var isValidating = false
     @State private var errorMessage: String? = nil
+    @State private var didAppear = false
 
     private var t: (String) -> String { langStore.t }
 
@@ -160,7 +161,16 @@ struct LoginView: View {
         }
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
         .environment(\.layoutDirection, langStore.current.isRTL ? .rightToLeft : .leftToRight)
-        .task { await session.restoreAsync() }
+        .onAppear {
+            if !didAppear {
+                didAppear = true
+                if let msg = session.revocationMessage {
+                    errorMessage = msg
+                    session.revocationMessage = nil
+                }
+                Task { await session.restoreAsync() }
+            }
+        }
     }
 
     // MARK: - Validate
