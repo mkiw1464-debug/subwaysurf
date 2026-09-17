@@ -81,7 +81,6 @@ final class SessionStore: ObservableObject {
                 let result = await LicenseService.revalidateBackground(key: key)
 
                 await MainActor.run {
-                    guard let self else { return }
                     switch result {
                     case .ok:
                         self.networkErrorCount = 0
