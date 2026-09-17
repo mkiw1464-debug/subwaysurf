@@ -52,34 +52,16 @@ jobs:
       - name: Validate pbxproj file references
         run: |
           PBXPROJ="${{ steps.paths.outputs.PROJ }}/project.pbxproj"
-          echo "Checking: $PBXPROJ"
           for entry in \
-            "App.swift" \
-            "Utils.swift" \
-            "SBX.swift" \
-            "MG.swift" \
-            "KernelExploit.swift" \
-            "SupportPolicy.swift" \
-            "ContainerStore.swift" \
-            "Localization.swift" \
-            "LicenseService.swift" \
-            "FFInjectService.swift" \
-            "ContainerIdentityResolver.swift" \
-            "StringObfuscator.swift" \
-            "AntiDebug.swift" \
-            "SessionStore.swift" \
-            "LanguagePickerView.swift" \
-            "LoginView.swift" \
-            "MainMenuView.swift" \
-            "bad_query.c" \
-            "mcm_bridge.m" \
-            "kexploit_opa334.m" \
-            "offsets.m" \
-            "krw.m" \
-            "kutils.m" \
-            "vnode.m" \
-            "sandbox_escape.m" \
-            "wallpaper_zip.c"; do
+            "App.swift" "Utils.swift" "SBX.swift" "MG.swift" \
+            "KernelExploit.swift" "SupportPolicy.swift" "ContainerStore.swift" \
+            "Localization.swift" "LicenseService.swift" "FFInjectService.swift" \
+            "ContainerIdentityResolver.swift" "StringObfuscator.swift" \
+            "AntiDebug.swift" "SessionStore.swift" \
+            "LanguagePickerView.swift" "LoginView.swift" "MainMenuView.swift" \
+            "bad_query.c" "mcm_bridge.m" "kexploit_opa334.m" \
+            "offsets.m" "krw.m" "kutils.m" "vnode.m" \
+            "sandbox_escape.m" "wallpaper_zip.c"; do
             if grep -q "$entry" "$PBXPROJ"; then
               echo "  OK $entry"
             else
@@ -94,55 +76,21 @@ jobs:
           cd "${{ steps.paths.outputs.PROJ_DIR }}"
           xcodebuild -project FFEX.xcodeproj -list 2>&1 || true
 
-      - name: Install SwiftShield (symbol obfuscation)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SSVER=$(curl -sf \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/rockbruno/swiftshield/releases/latest" \
-            | grep '"tag_name"' | cut -d'"' -f4)
-          if [ -z "$SSVER" ]; then SSVER="3.14.3"; fi
-          echo "SwiftShield $SSVER"
-          curl -fL "https://github.com/rockbruno/swiftshield/releases/download/${SSVER}/swiftshield.zip" \
-            -o /tmp/ss.zip
-          unzip -o /tmp/ss.zip -d /tmp/swiftshield
-          SS_BIN=$(find /tmp/swiftshield -name "swiftshield" -type f | grep -v dSYM | head -1)
-          chmod +x "$SS_BIN"
-          echo "$(dirname "$SS_BIN")" >> $GITHUB_PATH
-
-      - name: Obfuscate Swift symbols
-        run: |
-          cd "${{ steps.paths.outputs.PROJ_DIR }}"
-          swiftshield obfuscate \
-            --project-root . \
-            --scheme FFEX \
-            --output-path "$RUNNER_TEMP/obfuscated" \
-            --ignore-files "App.swift,AntiDebug.swift" \
-            2>&1 | tee /tmp/swiftshield.log || true
-
-          if [ -d "$RUNNER_TEMP/obfuscated" ]; then
-            echo "SS_PROJ_DIR=$RUNNER_TEMP/obfuscated" >> $GITHUB_ENV
-          else
-            echo "SwiftShield fallback — building from source"
-            echo "SS_PROJ_DIR=${{ steps.paths.outputs.PROJ_DIR }}" >> $GITHUB_ENV
-          fi
-
       - name: Build (unsigned, hardened, size-optimised)
         run: |
           set -o pipefail
-          BUILD_DIR="${SS_PROJ_DIR:-${{ steps.paths.outputs.PROJ_DIR }}}"
-          cd "$BUILD_DIR"
+          cd "${{ steps.paths.outputs.PROJ_DIR }}"
           BUILD_OUT="$RUNNER_TEMP/build_output"
 
           xcodebuild build \
             -project FFEX.xcodeproj \
             -scheme FFEX \
             -configuration Release \
+            -sdk iphoneos \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             SDKROOT=iphoneos \
             ONLY_ACTIVE_ARCH=NO \
+            EXCLUDED_ARCHS="arm64e x86_64 i386" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
@@ -174,7 +122,6 @@ jobs:
         if: failure()
         run: |
           tail -500 /tmp/xcodebuild.log || true
-          cat /tmp/swiftshield.log || true
 
       - name: Package IPA
         run: |
@@ -197,8 +144,7 @@ jobs:
           cd "$RUNNER_TEMP/IPAStaging"
           zip -r "$RUNNER_TEMP/FFEX.ipa" Payload/
 
-          IPA_BYTES=$(wc -c < "$RUNNER_TEMP/FFEX.ipa")
-          echo "IPA size: $(du -sh "$RUNNER_TEMP/FFEX.ipa" | cut -f1) ($IPA_BYTES bytes)"
+          echo "IPA size: $(du -sh "$RUNNER_TEMP/FFEX.ipa" | cut -f1)"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
