@@ -26,7 +26,7 @@ struct LicenseInfo {
     let iPhoneModel: String
 }
 
-// MARK: - Revocation reason (for UI feedback)
+// MARK: - Revocation reason
 
 enum RevocationReason {
     case banned, deleted, expired, deviceMismatch, unknown
@@ -42,7 +42,7 @@ enum RevocationReason {
     }
 }
 
-// MARK: - Device ID (HWID)
+// MARK: - Device ID
 
 enum DeviceID {
     private static let _hk: [UInt8] = [0x3c,0x3c,0x3f,0x22,0x2e,0x05,0x32,0x2d,0x33,0x3e]
@@ -65,7 +65,6 @@ enum DeviceID {
 
 enum LicenseService {
 
-    // XOR-encoded Vercel API endpoint
     private static let _au: [UInt8] = [
         0x32,0x2e,0x2e,0x2a,0x29,0x60,0x75,0x75,
         0x3c,0x3c,0x3f,0x22,0x22,0x22,0x22,0x74,
@@ -79,59 +78,104 @@ enum LicenseService {
     static var storageKey: String { S.licenseStorageKey }
     static var expiryKey: String  { S.licenseExpiryKey }
 
-    // MARK: - Validate (login + revalidation)
+    // MARK: - Validate
 
     static func validate(key: String) async throws -> LicenseInfo {
         var req = URLRequest(url: apiURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 10
+
+        // No cache — always fresh from server
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+
         let body: [String: Any] = ["key": key, "hwid": DeviceID.hwid]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse else { throw LicenseError.networkError }
+        let data: Data
+        let response: URLResponse
 
-        // 401 / 403 / 404 = key banned, deleted, or invalid — force logout
-        switch http.statusCode {
-        case 401: throw LicenseError.revoked(.banned)
-        case 403: throw LicenseError.revoked(.banned)
-        case 404: throw LicenseError.revoked(.deleted)
-        case 200..<300: break
-        default: throw LicenseError.serverError(http.statusCode)
+        do {
+            (data, response) = try await URLSession.shared.data(for: req)
+        } catch let urlErr as URLError {
+            // Real network issue — don't logout
+            switch urlErr.code {
+            case .notConnectedToInternet, .networkConnectionLost,
+                 .timedOut, .cannotConnectToHost, .dnsLookupFailed:
+                throw LicenseError.networkError
+            default:
+                throw LicenseError.networkError
+            }
+        } catch {
+            throw LicenseError.networkError
         }
 
-        let decoded = try JSONDecoder().decode(LicenseResponse.self, from: data)
+        guard let http = response as? HTTPURLResponse else {
+            throw LicenseError.networkError
+        }
 
-        // Check status field from server
+        // HTTP status → revocation
+        switch http.statusCode {
+        case 200..<300:
+            break // continue to parse body
+        case 401, 403:
+            throw LicenseError.revoked(.banned)
+        case 404:
+            throw LicenseError.revoked(.deleted)
+        case 500..<600:
+            throw LicenseError.networkError // server error = transient, don't logout
+        default:
+            throw LicenseError.revoked(.unknown)
+        }
+
+        // Parse body
+        let decoded: LicenseResponse
+        do {
+            decoded = try JSONDecoder().decode(LicenseResponse.self, from: data)
+        } catch {
+            throw LicenseError.networkError // malformed response = treat as transient
+        }
+
+        // Check status string from API
         if let status = decoded.status?.lowercased() {
             if status.contains("ban")     { throw LicenseError.revoked(.banned) }
             if status.contains("delet")   { throw LicenseError.revoked(.deleted) }
             if status.contains("expir")   { throw LicenseError.revoked(.expired) }
             if status.contains("invalid") { throw LicenseError.revoked(.unknown) }
+            if status.contains("revok")   { throw LicenseError.revoked(.unknown) }
         }
 
-        guard decoded.valid else { throw LicenseError.revoked(.unknown) }
+        // valid: false = key deleted/invalid
+        guard decoded.valid else {
+            throw LicenseError.revoked(.deleted)
+        }
 
+        // HWID binding check
         if let serverHwid = decoded.hwid, !serverHwid.isEmpty, serverHwid != DeviceID.hwid {
             throw LicenseError.revoked(.deviceMismatch)
         }
 
+        // Expiry check
         let expiresRaw = decoded.expiresAt ?? ""
         let expiryDate = parseISODate(expiresRaw)
-        if let exp = expiryDate, exp < Date() { throw LicenseError.revoked(.expired) }
-        let formatted = expiryDate.map { formatDate($0) } ?? expiresRaw
+        if let exp = expiryDate, exp < Date() {
+            throw LicenseError.revoked(.expired)
+        }
 
         let info = LicenseInfo(
-            key: key, expiresAt: formatted, expiryDate: expiryDate,
-            deviceName: DeviceID.deviceName, hwid: DeviceID.hwid,
-            iOSVersion: DeviceID.iOSVersion, iPhoneModel: DeviceID.iPhoneModel
+            key: key,
+            expiresAt: expiryDate.map { formatDate($0) } ?? expiresRaw,
+            expiryDate: expiryDate,
+            deviceName: DeviceID.deviceName,
+            hwid: DeviceID.hwid,
+            iOSVersion: DeviceID.iOSVersion,
+            iPhoneModel: DeviceID.iPhoneModel
         )
         store(key: key, expiryRaw: expiresRaw)
         return info
     }
 
-    // MARK: - Restore session (async, server-confirmed)
+    // MARK: - Restore
 
     static func restoreSession() async -> LicenseInfo? {
         guard let key = storedKey() else { return nil }
@@ -139,14 +183,10 @@ enum LicenseService {
            let expDate = parseISODate(expRaw), expDate < Date() {
             logout(); return nil
         }
-        do {
-            return try await validate(key: key)
-        } catch {
-            logout(); return nil
-        }
+        do { return try await validate(key: key) }
+        catch LicenseError.networkError { return restoreSessionLocal() } // offline = use local
+        catch { logout(); return nil }
     }
-
-    // MARK: - Restore session (local fast bootstrap)
 
     static func restoreSessionLocal() -> LicenseInfo? {
         guard let key    = storedKey(),
@@ -157,17 +197,19 @@ enum LicenseService {
             key: key,
             expiresAt: expiryDate.map { formatDate($0) } ?? expRaw,
             expiryDate: expiryDate,
-            deviceName: DeviceID.deviceName, hwid: DeviceID.hwid,
-            iOSVersion: DeviceID.iOSVersion, iPhoneModel: DeviceID.iPhoneModel
+            deviceName: DeviceID.deviceName,
+            hwid: DeviceID.hwid,
+            iOSVersion: DeviceID.iOSVersion,
+            iPhoneModel: DeviceID.iPhoneModel
         )
     }
 
-    // MARK: - Background revalidation — returns nil on network error (don't logout), revocation on auth fail
+    // MARK: - Background revalidation result
 
     enum RevalResult {
         case ok
         case revoked(RevocationReason)
-        case networkError  // transient, don't logout
+        case networkError
     }
 
     static func revalidateBackground(key: String) async -> RevalResult {
@@ -177,15 +219,18 @@ enum LicenseService {
         } catch LicenseError.revoked(let reason) {
             return .revoked(reason)
         } catch LicenseError.networkError {
-            return .networkError  // no internet — keep session alive
+            return .networkError
         } catch {
-            return .revoked(.unknown)
+            // Any other error treat as network — don't logout aggressively
+            return .networkError
         }
     }
 
     // MARK: - Storage
 
-    static func storedKey() -> String? { UserDefaults.standard.string(forKey: storageKey) }
+    static func storedKey() -> String? {
+        UserDefaults.standard.string(forKey: storageKey)
+    }
 
     private static func store(key: String, expiryRaw: String) {
         UserDefaults.standard.set(key,       forKey: storageKey)
@@ -253,16 +298,7 @@ enum LicenseService {
 
 // MARK: - Errors
 
-enum LicenseError: LocalizedError {
+enum LicenseError: Error {
     case revoked(RevocationReason)
     case networkError
-    case serverError(Int)
-
-    var errorDescription: String? {
-        switch self {
-        case .revoked(let r):       return r.displayMessage
-        case .networkError:         return "Network error — check your connection"
-        case .serverError(let c):   return "Server error (\(c))"
-        }
-    }
 }
