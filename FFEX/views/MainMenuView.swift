@@ -249,7 +249,7 @@ struct MainMenuView: View {
         let current = state.wrappedValue
         let isUnavailable = current == .unavailable || current == .checking
         let isWorking     = current == .injecting
-        let isDone        = current == .done
+
 
         Button {
             Task { await handleInject(game: game, state: state, activeSession: activeSession) }
