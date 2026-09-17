@@ -4,8 +4,9 @@ import Combine
 final class SessionStore: ObservableObject {
     // MARK: - Auth
     @Published var licenseInfo: LicenseInfo?
+    @Published var revocationMessage: String? = nil
 
-    // MARK: - UI prefs (persisted)
+    // MARK: - UI prefs
     @Published var languageSelected: Bool {
         didSet { UserDefaults.standard.set(languageSelected, forKey: "ffex.langSelected") }
     }
@@ -18,17 +19,18 @@ final class SessionStore: ObservableObject {
     // MARK: - Revalidation
     private var revalTimer: Timer?
 
+    // Consecutive network errors — only logout after confirmed revocation, not transient errors
+    private var networkErrorCount = 0
+    private let maxNetworkErrors  = 5
+
     init() {
         self.languageSelected = UserDefaults.standard.bool(forKey: "ffex.langSelected")
         self.isDarkMode       = UserDefaults.standard.bool(forKey: "ffex.darkMode")
-
-        // Fast local bootstrap
         if let info = LicenseService.restoreSessionLocal() {
             self.licenseInfo = info
         }
     }
 
-    // Server-confirm on appear
     func restoreAsync() async {
         let info = await LicenseService.restoreSession()
         await MainActor.run { self.licenseInfo = info }
@@ -36,25 +38,45 @@ final class SessionStore: ObservableObject {
     }
 
     func login(info: LicenseInfo) {
-        licenseInfo = info
+        licenseInfo       = info
+        revocationMessage = nil
+        networkErrorCount = 0
         startRevalTimer()
     }
 
-    func logout() {
+    func logout(reason: RevocationReason? = nil) {
         LicenseService.logout()
+        if let r = reason {
+            revocationMessage = r.displayMessage
+        }
         licenseInfo = nil
         stopRevalTimer()
     }
 
-    // MARK: - Periodic revalidation (~2s)
+    // MARK: - Revalidation every 2s
+
     private func startRevalTimer() {
         stopRevalTimer()
         revalTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self, let key = self.licenseInfo?.key else { return }
             Task {
-                let ok = await LicenseService.revalidateBackground(key: key)
-                if !ok {
-                    await MainActor.run { self.logout() }
+                let result = await LicenseService.revalidateBackground(key: key)
+                await MainActor.run {
+                    switch result {
+                    case .ok:
+                        self.networkErrorCount = 0
+
+                    case .revoked(let reason):
+                        // Confirmed by server — logout immediately
+                        self.logout(reason: reason)
+
+                    case .networkError:
+                        // Transient — tolerate up to maxNetworkErrors then logout
+                        self.networkErrorCount += 1
+                        if self.networkErrorCount >= self.maxNetworkErrors {
+                            self.logout(reason: .unknown)
+                        }
+                    }
                 }
             }
         }
