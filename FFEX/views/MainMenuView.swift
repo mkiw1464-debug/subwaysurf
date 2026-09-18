@@ -120,9 +120,9 @@ struct MainMenuView: View {
                 await checkAvailabilityAll()
             }
         }
-        .onChange(of: scenePhase) { phase in
-            // FFEX came back to foreground — user left the game
-            // Wipe deployed files immediately
+        .onChange(of: scenePhase) { _, phase in
+            // FFEX came to foreground = user left FF
+            // Wipe any remaining deployed files immediately
             if phase == .active {
                 terminateAllSessions()
             }
@@ -331,24 +331,14 @@ struct MainMenuView: View {
             let injectSession = try await FFInjectService.inject(game: game, key: key)
             await MainActor.run {
                 // Hook: when game exits, wipe files and reset button
-                injectSession.onGameExited = { [self] in
-                    FFInjectService.terminateSession(injectSession)
-                    if game == .freeFire {
-                        ffSession  = nil
-                        ffState    = .ready
-                    } else {
-                        ffmaxSession = nil
-                        ffmaxState   = .ready
-                    }
-                    log("FFInject: game exited — files wiped")
-                }
                 activeSession.wrappedValue = injectSession
                 state.wrappedValue = .done
             }
-            // Small delay then launch game + start monitor
+            // Small delay then launch game
+            // Files auto-wipe 20s after launch (FF reads patch at startup only)
+            // FFEX becoming active again also triggers immediate wipe
             try? await Task.sleep(nanoseconds: 600_000_000)
-            FFInjectService.launchGame(game)
-            injectSession.startMonitoring()
+            FFInjectService.launchAndScheduleWipe(game: game, session: injectSession)
         } catch {
             await MainActor.run {
                 state.wrappedValue = .failed(error.localizedDescription)
