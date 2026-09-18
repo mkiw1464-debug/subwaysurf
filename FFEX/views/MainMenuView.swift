@@ -17,7 +17,6 @@ enum InjectState: Equatable {
 struct MainMenuView: View {
     @EnvironmentObject var session: SessionStore
     @StateObject private var langStore = LanguageStore.shared
-    @Environment(\.scenePhase) private var scenePhase
 
     @State private var isOnline: Bool? = nil
     @State private var showLogoutAlert = false
@@ -120,12 +119,9 @@ struct MainMenuView: View {
                 await checkAvailabilityAll()
             }
         }
-        .onChange(of: scenePhase) { _, phase in
-            // FFEX came to foreground = user left FF
-            // Wipe any remaining deployed files immediately
-            if phase == .active {
-                terminateAllSessions()
-            }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // FFEX came to foreground = user left FF — wipe remaining files
+            terminateAllSessions()
         }
         .alert(t("logout_confirm_title"), isPresented: $showLogoutAlert) {
             Button(t("logout_confirm_yes"), role: .destructive) {
